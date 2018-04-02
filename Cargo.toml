@@ -1,0 +1,9 @@
+[package]
+name = "slowread"
+version = "0.1.0"
+authors = ["Bernardo Belchior <bernardo.belchior1@gmail.com>"]
+
+[dependencies]
+tokio = "0.1"
+http = "0.1"
+futures = "0.1"
