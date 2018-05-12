@@ -1,3 +1,5 @@
+mod request;
+
 extern crate futures;
 extern crate http;
 extern crate rand;
@@ -11,14 +13,13 @@ extern crate trust_dns_resolver;
 extern crate openssl;
 extern crate tokio_openssl;
 
+use request::{create_request_str, create_default_request};
 use tokio_openssl::{SslConnectorExt};
 use openssl::ssl::{SslConnectorBuilder, SslConnector, SslMethod};
 use futures::future::{loop_fn, Future, Loop, ok};
 use futures::stream::Stream;
 use rand::Rng;
-use http::{Request,
-header::HeaderValue,
-uri::Scheme};
+use http::{Request, uri::Scheme};
 use tokio::spawn;
 use std::net::IpAddr;
 use std::net::SocketAddr;
@@ -45,50 +46,32 @@ struct Options {
     pipeline_factor: usize,
 
     /// Minimum receive buffer size
-    #[structopt(
-        short = "m",
-        long = "min-recv-buffer-size",
-        default_value = "10",
-        parse(from_str = "parse_recv_buffer_size")
-        )]
-        min_recv_buffer_size: usize,
+    #[structopt(short = "m", long = "min-recv-buffer-size", default_value = "10", parse(from_str = "parse_recv_buffer_size"))]
+    min_recv_buffer_size: usize,
 
-        /// Maximum receive buffer size
-        #[structopt(
-            short = "M",
-            long = "max-recv-buffer-size",
-            default_value = "20",
-            parse(from_str = "parse_recv_buffer_size")
-            )]
-            max_recv_buffer_size: usize,
+    /// Maximum receive buffer size
+    #[structopt(short = "M", long = "max-recv-buffer-size", default_value = "20", parse(from_str = "parse_recv_buffer_size"))]
+    max_recv_buffer_size: usize,
 
-            /// Bytes to read in a single read 
-            #[structopt(short = "r", long = "read-len", default_value = "32")]
-            read_len: usize,
+    /// Bytes to read in a single read 
+    #[structopt(short = "r", long = "read-len", default_value = "32")]
+    read_len: usize,
 
-            /// Maximum number of open connections at any given time
-            #[structopt(short = "c", long = "connections", default_value = "1000")]
-            connections: usize,
+    /// Maximum number of open connections at any given time
+    #[structopt(short = "c", long = "connections", default_value = "1000")]
+    connections: usize,
 
-            /// Interval between read operations in seconds
-            #[structopt(
-                short = "w", long = "wait-time", default_value = "5", parse(from_str = "parse_duration")
-                )]
-                wait_time: Duration,
+    /// Interval between read operations in seconds
+    #[structopt(short = "w", long = "wait-time", default_value = "5", parse(from_str = "parse_duration"))]
+    wait_time: Duration,
 
-                /// Duration of the attack in seconds
-                #[structopt(
-                    short = "d",
-                    long = "attack-duration",
-                    default_value = "300",
-                    parse(from_str = "parse_duration")
-                    )]
-                    attack_duration: Duration,
+    /// Duration of the attack in seconds
+    #[structopt(short = "d", long = "attack-duration", default_value = "300", parse(from_str = "parse_duration"))]
+    attack_duration: Duration,
 }
 
 fn parse_duration(src: &str) -> Duration {
-    let secs: u64 = src.parse().unwrap();
-    Duration::from_secs(secs)
+    Duration::from_secs(src.parse().unwrap())
 }
 
 fn parse_recv_buffer_size(src: &str) -> usize {
@@ -96,7 +79,7 @@ fn parse_recv_buffer_size(src: &str) -> usize {
 }
 
 fn generate_socket_addr(request: &Request<()>) -> SocketAddr {
-    let port = if request.uri().scheme_part().unwrap().as_str().starts_with("https") {
+    let port = if request.uri().scheme_part().unwrap() == &Scheme::HTTPS {
         443
     } else {
         80
@@ -129,20 +112,11 @@ fn generate_socket_addr(request: &Request<()>) -> SocketAddr {
 fn main() {
     let options = Options::from_args();
 
-    let mut request = Request::get(&options.address)
-        .header("User-Agent", "rust")
-        .header("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8")
-        .header("Accept-Encoding", "gzip, deflate, br")
-        .header("Connection", "Keep-Alive")
-        .header("Cache-Control", "no-cache")
-        .body(())
-        .unwrap();
-
-    let host = request.uri().authority_part().unwrap().host().to_string();
-    request.headers_mut().insert("Host", HeaderValue::from_str(&host).unwrap());
+    let request = create_default_request(&options.address);
 
     let sock_addr = generate_socket_addr(&request);
 
+    let host = request.uri().authority_part().unwrap().host().to_string();
     println!("Connecting to \"{}\"", host);
 
     tokio::run(launch_attacks(sock_addr, request, options));
@@ -196,26 +170,6 @@ fn launch_attacks(
 
 fn print_stats(secs_since_start: u64, open_connections: &Arc<AtomicUsize>) {
     println!("Time: {}s\nOpen connections: {}\n\n", secs_since_start, open_connections.load(Ordering::SeqCst));
-}
-
-fn create_request_str(req: &Request<()>) -> String {
-    let mut req_str = String::new();
-
-    req_str.push_str(req.method().as_str());
-    req_str.push_str(" ");
-    req_str.push_str(req.uri().path());
-    req_str.push_str(" HTTP/1.1\r\n");
-
-    req.headers().iter().for_each(|(name, value)| {
-        req_str.push_str(name.as_str());
-        req_str.push_str(": ");
-        req_str.push_str(value.to_str().unwrap());
-        req_str.push_str("\r\n");
-    });
-
-    req_str.push_str("\r\n");
-
-    req_str
 }
 
 fn launch_attack_over_http(
