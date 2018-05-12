@@ -73,7 +73,7 @@ impl Request {
 
         if ip_addr_option.is_none() {
             panic!(
-                "The address \"{}\" resolved to zero IP addresses. Aborting exeuction...",
+                "The address \"{}\" resolved to zero IP addresses. Aborting execution...",
                 host
                 );
         }
