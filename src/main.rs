@@ -209,11 +209,8 @@ fn launch_attack_over_http(
                 .then(move |res| {
                     let (wait_time, value) = match res {
                         Err(_) => (Duration::from_secs(0), ok(Loop::Break(()))),
-                        Ok((tcp_stream, buf)) => {
-                                println!("len: {}   read: {}", buf.len(), String::from_utf8(buf).unwrap());
-                            (wait_time, ok(Loop::Continue(tcp_stream)))
-                        }
-                    };
+                        Ok((tcp_stream, _buf)) => (wait_time, ok(Loop::Continue(tcp_stream)))
+                        };
 
                     Delay::new(Instant::now() + wait_time)
                         .map_err(|e| println!("{:?}", e))
