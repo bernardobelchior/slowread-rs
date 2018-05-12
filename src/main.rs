@@ -13,15 +13,14 @@ extern crate trust_dns_resolver;
 extern crate openssl;
 extern crate tokio_openssl;
 
-use request::{create_request_str, create_default_request};
+use request::Request;
 use tokio_openssl::SslConnectorExt;
 use openssl::ssl::{SslConnectorBuilder, SslConnector, SslMethod};
 use futures::future::{loop_fn, Future, Loop, ok};
 use futures::stream::Stream;
 use rand::Rng;
-use http::{Request, uri::Scheme};
+use http::{Request as Req, uri::Scheme};
 use tokio::spawn;
-use std::net::IpAddr;
 use std::net::SocketAddr;
 use std::sync::{
     atomic::{AtomicUsize, Ordering},
@@ -32,7 +31,6 @@ use structopt::StructOpt;
 use tokio::io::{self, AsyncRead, AsyncWrite};
 use tokio::net::TcpStream;
 use tokio::timer::{Delay, Deadline, Interval};
-use trust_dns_resolver::Resolver;
 
 trait AsyncStream: AsyncRead + AsyncWrite + Send {}
 impl<T> AsyncStream for T where T: AsyncRead + AsyncWrite + Send {}
@@ -81,63 +79,30 @@ fn parse_recv_buffer_size(src: &str) -> usize {
     src.parse::<usize>().unwrap() / 2
 }
 
-fn generate_socket_addr(request: &Request<()>) -> SocketAddr {
-    let port = if request.uri().scheme_part().unwrap() == &Scheme::HTTPS {
-        443
-    } else {
-        80
-    };
-
-    let host = request.uri().authority_part().unwrap().host();
-    let resolver = Resolver::from_system_conf().unwrap();
-    let response = resolver.lookup_ip(host);
-
-    if response.is_err() {
-        let error = response.unwrap_err();
-        panic!(
-            "Error resolving host \"{}\". \n{}\nAborting execution...",
-            host, error
-            );
-    }
-
-    let ip_addr_option: Option<IpAddr> = response.unwrap().iter().next();
-
-    if ip_addr_option.is_none() {
-        panic!(
-            "The address \"{}\" resolved to zero IP addresses. Aborting exeuction...",
-            host
-            );
-    }
-
-    SocketAddr::new(ip_addr_option.unwrap(), port)
-}
 
 fn main() {
     let options = Options::from_args();
 
-    let request = create_default_request(&options.address);
+    let request = Request::new(&options.address, options.pipeline_factor);
 
-    let sock_addr = generate_socket_addr(&request);
-
-    let host = request.uri().authority_part().unwrap().host().to_string();
+    let host = request.host().to_string();
     println!("Connecting to \"{}\"", host);
 
-    tokio::run(launch_attacks(sock_addr, request, options));
+    tokio::run(launch_attacks(request, options));
 }
 
 fn launch_attacks(
-    sock_addr: SocketAddr,
-    request: Request<()>,
+    request: Request,
     options: Options,
     )-> impl Future<Item = (), Error = ()> {
 
     let open_connections = Arc::new(AtomicUsize::new(0));
     let attack_duration = options.attack_duration;
     let start_time = Instant::now();
-    let sock_addr = sock_addr.clone();
-    let scheme = request.uri().scheme_part().unwrap().clone();
-    let host = Arc::new(request.uri().authority_part().unwrap().host().to_string());
-    let request = Arc::new(create_request_str(&request).repeat(options.pipeline_factor));
+    let sock_addr = request.sock_addr().clone();
+    let scheme = request.scheme().clone();
+    let host = Arc::new(request.host().to_string());
+    let request = Arc::new(request.request_str().to_string());
 
     let interval = 
         Interval::new(start_time, Duration::from_secs(1))
