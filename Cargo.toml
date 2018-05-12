@@ -6,9 +6,12 @@ authors = ["Bernardo Belchior <bernardo.belchior1@gmail.com>"]
 [dependencies]
 tokio = "0.1"
 tokio-timer = "0.1"
+openssl = "0.10"
+tokio-openssl = "0.2"
 http = "0.1"
 futures = "0.1"
 structopt = "0.2"
 trust-dns-resolver = "^0.8"
 native-tls = "0.1"
 tokio-tls = "0.1"
+rand = "0.4"
