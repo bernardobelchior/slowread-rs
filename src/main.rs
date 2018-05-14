@@ -78,7 +78,7 @@ fn parse_duration(src: &str) -> Duration {
 }
 
 fn parse_recv_buffer_size(src: &str) -> usize {
-    src.parse::<usize>().unwrap() / 2
+    src.parse::<usize>().unwrap()
 }
 
 
@@ -182,7 +182,7 @@ fn print_config(options: &Options) {
     println!("Address: {}", options.address);
     println!("HTTP Pipeline Factor: {}", options.pipeline_factor);
     println!("Min Receive Buffer Size: {} bytes", options.min_recv_buffer_size);
-    println!("Max Receive Buffer Size: {} bytes", options.min_recv_buffer_size);
+    println!("Max Receive Buffer Size: {} bytes", options.max_recv_buffer_size);
     println!("Bytes Read in a Single Read: {} bytes", options.read_len);
     println!("Number of Connections: {}", options.connections);
     println!("Interval Between Reads: {}s", options.wait_time.as_secs());
