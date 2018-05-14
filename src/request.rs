@@ -7,6 +7,7 @@ use trust_dns_resolver::Resolver;
 pub struct Request {
     request: Req<()>,
     request_str: String,
+    root_request_str: String,
     sock_addr: SocketAddr,
 }
 
@@ -24,12 +25,14 @@ impl Request {
         let host = request.uri().authority_part().unwrap().host().to_string();
         request.headers_mut().insert("Host", HeaderValue::from_str(&host).unwrap());
 
-        let request_str = Request::create_request_str(&request, pipeline_factor);
+        let request_str = Request::create_request_str(&request, request.uri().path(), pipeline_factor);
+        let root_request_str = Request::create_request_str(&request, "/", 1);
         let sock_addr = Request::generate_socket_addr(&request);
 
         Request {
             request,
             request_str,
+            root_request_str,
             sock_addr,
         }
     }
@@ -48,6 +51,10 @@ impl Request {
 
     pub fn request_str(&self) -> &str {
         &self.request_str
+    }
+
+    pub fn root_request_str(&self) -> &str {
+        &self.root_request_str
     }
 
     fn generate_socket_addr(request: &Req<()>) -> SocketAddr {
@@ -81,13 +88,12 @@ impl Request {
         SocketAddr::new(ip_addr_option.unwrap(), port)
     }
 
-
-    fn create_request_str(req: &Req<()>, pipeline_factor: usize) -> String {
+    fn create_request_str(req: &Req<()>, path: &str, pipeline_factor: usize) -> String {
         let mut req_str = String::new();
 
         req_str.push_str(req.method().as_str());
         req_str.push_str(" ");
-        req_str.push_str(req.uri().path());
+        req_str.push_str(path);
         req_str.push_str(" HTTP/1.1\r\n");
 
         req.headers().iter().for_each(|(name, value)| {
